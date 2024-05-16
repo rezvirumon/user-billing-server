@@ -94,6 +94,22 @@ app.put('/customers/:id', async (req, res) => {
     }
 });
 
+// Fetch customer by ID
+app.get('/customers/:id', async (req, res) => {
+    const customerId = req.params.id;
+    try {
+        const customer = await Customer.findById(customerId);
+        if (!customer) {
+            return res.status(404).send('Customer not found');
+        }
+        res.status(200).json(customer); // Return customer details as JSON
+    } catch (err) {
+        console.error(err);
+        res.status(500).send(err.message);
+    }
+});
+
+
 
 // Handle 404 Error
 app.use((req, res, next) => {
