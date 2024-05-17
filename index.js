@@ -155,7 +155,6 @@ app.put('/billing/:id', async (req, res) => {
     }
 });
 
-
 // Search customers by query
 app.get('/search', async (req, res) => {
     const { query } = req.query;
@@ -183,16 +182,90 @@ app.get('/search', async (req, res) => {
 app.get('/dashboard', async (req, res) => {
     try {
         const totalCustomers = await Customer.countDocuments();
-        const totalCollections = await Customer.aggregate([{ $group: { _id: null, total: { $sum: "$bill" } } }]);
-        const totalDues = await Customer.aggregate([{ $match: { paymentStatus: "Unpaid" } }, { $group: { _id: null, total: { $sum: "$due" } } }]);
-        const totalAdvanced = await Customer.aggregate([{ $match: { paymentStatus: "Advanced" } }, { $group: { _id: null, total: { $sum: "$due" } } }]);
+
+        const totalCollections = await Customer.aggregate([
+            { $unwind: "$payments" },
+            { $group: { _id: null, total: { $sum: "$payments.amount" } } }
+        ]);
+
+        const totalDues = await Customer.aggregate([
+            { $match: { paymentStatus: "Unpaid" } },
+            { $group: { _id: null, total: { $sum: "$due" } } }
+        ]);
+
+        const totalAdvanced = await Customer.aggregate([
+            { $unwind: "$payments" },
+            { $match: { $expr: { $gt: ["$payments.amount", "$bill"] } } },
+            { $group: { _id: null, total: { $sum: { $subtract: ["$payments.amount", "$bill"] } } } }
+        ]);
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const tomorrow = new Date(today);
+        tomorrow.setDate(today.getDate() + 1);
+
+        const thisMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+        const nextMonthStart = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+
+        const todaysCollection = await Customer.aggregate([
+            { $unwind: "$payments" },
+            { $match: { "payments.date": { $gte: today, $lt: tomorrow } } },
+            { $group: { _id: null, total: { $sum: "$payments.amount" } } }
+        ]);
+
+        const thisMonthsCollection = await Customer.aggregate([
+            { $unwind: "$payments" },
+            { $match: { "payments.date": { $gte: thisMonthStart, $lt: nextMonthStart } } },
+            { $group: { _id: null, total: { $sum: "$payments.amount" } } }
+        ]);
 
         res.status(200).json({
             totalCustomers: totalCustomers,
             totalCollections: totalCollections.length > 0 ? totalCollections[0].total : 0,
             totalDues: totalDues.length > 0 ? totalDues[0].total : 0,
-            totalAdvanced: totalAdvanced.length > 0 ? totalAdvanced[0].total : 0
+            totalAdvanced: totalAdvanced.length > 0 ? totalAdvanced[0].total : 0,
+            todaysCollection: todaysCollection.length > 0 ? todaysCollection[0].total : 0,
+            thisMonthsCollection: thisMonthsCollection.length > 0 ? thisMonthsCollection[0].total : 0
         });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Endpoint for fetching chart data
+app.get('/dashboard/chart-data', async (req, res) => {
+    try {
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - 30); // last 30 days
+        startDate.setHours(0, 0, 0, 0);
+
+        const chartData = await Customer.aggregate([
+            { $unwind: "$payments" },
+            { $match: { "payments.date": { $gte: startDate } } },
+            {
+                $group: {
+                    _id: { $dateToString: { format: "%Y-%m-%d", date: "$payments.date" } },
+                    total: { $sum: "$payments.amount" },
+                    pay: { $sum: "$payments.amount" }, // Assuming 'amount' field exists
+                    due: { $sum: { $subtract: ["$bill", { $sum: "$payments.amount" }] } } // Calculating due
+                }
+            },
+            { $sort: { _id: 1 } }
+        ]);
+
+        res.status(200).json(chartData);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Endpoint to get distinct areas
+app.get('/areas', async (req, res) => {
+    try {
+        const areas = await Customer.distinct('area');
+        res.status(200).json(areas);
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: err.message });
