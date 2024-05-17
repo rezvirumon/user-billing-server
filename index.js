@@ -13,7 +13,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// MongoDB Connection URI with the new database location
+// MongoDB Connection URI
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.jaknolq.mongodb.net/user-billing-rumon`;
 
 mongoose.connect(uri, {
@@ -23,16 +23,35 @@ mongoose.connect(uri, {
     .then(() => console.log('Connected to MongoDB'))
     .catch(err => console.error('Error connecting to MongoDB:', err));
 
-    const customerSchema = new mongoose.Schema({
-        name: { type: String, required: true },
-        mobile: { type: String, required: true },
-        area: { type: String, required: true },
-        email: { type: String, required: true },
-        bill: { type: Number, default: 0 },
-        payments: [{ amount: Number, date: Date }],
-        due: { type: Number, default: 0 },
-        lastPayDate: { type: Date }
-    });
+// Customer Schema
+const customerSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    mobile: { type: String, required: true },
+    area: { type: String, required: true },
+    email: { type: String, required: true },
+    bill: { type: Number, default: 0 },
+    payments: [{ amount: Number, date: Date }],
+    due: { type: Number, default: 0 },
+    lastPayDate: { type: Date },
+    paymentStatus: { type: String, default: 'Unpaid' }
+});
+
+// Method to calculate payment status
+customerSchema.methods.calculatePaymentStatus = function () {
+    const totalPayment = this.payments.reduce((total, payment) => total + payment.amount, 0);
+    const due = this.bill - totalPayment;
+
+    if (due === 0) {
+        this.paymentStatus = 'Paid';
+        this.due = 0;
+    } else if (due < 0) {
+        this.paymentStatus = 'Advanced';
+        this.due = 0;
+    } else {
+        this.paymentStatus = 'Unpaid';
+        this.due = due;
+    }
+};
 
 const Customer = mongoose.model('Customer', customerSchema);
 
@@ -46,6 +65,7 @@ app.post('/customers', async (req, res) => {
     const { name, mobile, area, email, bill } = req.body;
     try {
         const newCustomer = new Customer({ name, mobile, area, email, bill, due: bill });
+        newCustomer.calculatePaymentStatus();
         await newCustomer.save();
         res.status(201).send(newCustomer);
     } catch (err) {
@@ -98,12 +118,14 @@ app.delete('/customers/:id', async (req, res) => {
 // Update a customer's details by ID
 app.put('/customers/:id', async (req, res) => {
     const customerId = req.params.id;
-    const { name, mobile, area, email, bill } = req.body; // Get updated data from request body
+    const { name, mobile, area, email, bill } = req.body;
     try {
         const updatedCustomer = await Customer.findByIdAndUpdate(customerId, { name, mobile, area, email, bill }, { new: true });
         if (!updatedCustomer) {
             return res.status(404).json({ error: 'Customer not found' });
         }
+        updatedCustomer.calculatePaymentStatus();
+        await updatedCustomer.save();
         res.status(200).json(updatedCustomer);
     } catch (err) {
         console.error(err);
@@ -114,7 +136,7 @@ app.put('/customers/:id', async (req, res) => {
 // Update payment for a customer by ID
 app.put('/billing/:id', async (req, res) => {
     const customerId = req.params.id;
-    const { payment } = req.body; // Get updated payment from request body
+    const { payment } = req.body;
     try {
         const customer = await Customer.findById(customerId);
         if (!customer) {
@@ -122,7 +144,7 @@ app.put('/billing/:id', async (req, res) => {
         }
 
         customer.payments.push({ amount: payment, date: new Date() });
-        customer.due = customer.bill - customer.payments.reduce((sum, p) => sum + p.amount, 0);
+        customer.calculatePaymentStatus();
         customer.lastPayDate = new Date();
 
         await customer.save();
@@ -134,6 +156,48 @@ app.put('/billing/:id', async (req, res) => {
 });
 
 
+// Search customers by query
+app.get('/search', async (req, res) => {
+    const { query } = req.query;
+    if (!query) {
+        return res.status(400).send('Query parameter is required');
+    }
+
+    try {
+        const customers = await Customer.find({
+            $or: [
+                { name: { $regex: query, $options: 'i' } },
+                { mobile: { $regex: query, $options: 'i' } },
+                { area: { $regex: query, $options: 'i' } },
+                { email: { $regex: query, $options: 'i' } }
+            ]
+        });
+        res.status(200).send(customers);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send(err.message);
+    }
+});
+
+// New endpoint for fetching dashboard data
+app.get('/dashboard', async (req, res) => {
+    try {
+        const totalCustomers = await Customer.countDocuments();
+        const totalCollections = await Customer.aggregate([{ $group: { _id: null, total: { $sum: "$bill" } } }]);
+        const totalDues = await Customer.aggregate([{ $match: { paymentStatus: "Unpaid" } }, { $group: { _id: null, total: { $sum: "$due" } } }]);
+        const totalAdvanced = await Customer.aggregate([{ $match: { paymentStatus: "Advanced" } }, { $group: { _id: null, total: { $sum: "$due" } } }]);
+
+        res.status(200).json({
+            totalCustomers: totalCustomers,
+            totalCollections: totalCollections.length > 0 ? totalCollections[0].total : 0,
+            totalDues: totalDues.length > 0 ? totalDues[0].total : 0,
+            totalAdvanced: totalAdvanced.length > 0 ? totalAdvanced[0].total : 0
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
 
 
 // Handle 404 Error
