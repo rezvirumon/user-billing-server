@@ -2,14 +2,14 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 require('dotenv').config();
+const cron = require('node-cron');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors({
-    origin: ["http://localhost:5173",
-        "https://billing-rumon.netlify.app"],
+    origin: ["http://localhost:5173", "https://billing-rumon.netlify.app"],
     credentials: true,
 }));
 app.use(express.json());
@@ -24,26 +24,24 @@ mongoose.connect(uri, {
     .then(() => console.log('Connected to MongoDB'))
     .catch(err => console.error('Error connecting to MongoDB:', err));
 
-    const customerSchema = new mongoose.Schema({
-        name: { type: String, required: true },
-        mobile: { type: String, required: true },
-        area: { type: String, required: true },
-        email: { type: String, required: true },
-        bill: { type: Number, default: 0 },
-        payments: [{ 
-            amount: Number, 
-            date: Date,
-            receiver: String // Add receiver field here
-        }],
-        due: { type: Number, default: 0 },
-        lastPayDate: { type: Date },
-        paymentStatus: { type: String, default: 'Unpaid' }
-    });
+// Customer Schema and Model
+const customerSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    mobile: { type: String, required: true },
+    area: { type: String, required: true },
+    email: { type: String, required: true },
+    bill: { type: Number, default: 0 },
+    payments: [{ 
+        amount: Number, 
+        date: Date,
+        receiver: String
+    }],
+    due: { type: Number, default: 0 },
+    lastPayDate: { type: Date },
+    paymentStatus: { type: String, default: 'Unpaid' },
+    status: { type: String, default: 'Active' } // Add status field here
+});
 
-    
-    
-
-// Method to calculate payment status
 customerSchema.methods.calculatePaymentStatus = function () {
     const totalPayment = this.payments.reduce((total, payment) => total + payment.amount, 0);
     const due = this.bill - totalPayment;
@@ -60,9 +58,18 @@ customerSchema.methods.calculatePaymentStatus = function () {
     }
 };
 
-
-
 const Customer = mongoose.model('Customer', customerSchema);
+
+// Monthly Report Schema and Model
+const monthlyReportSchema = new mongoose.Schema({
+    year: { type: Number, required: true },
+    month: { type: Number, required: true },
+    totalCollections: { type: Number, required: true },
+    totalDues: { type: Number, required: true },
+    totalAdvanced: { type: Number, required: true },
+});
+
+const MonthlyReport = mongoose.model('MonthlyReport', monthlyReportSchema);
 
 // Routes
 app.get('/', (req, res) => {
@@ -71,15 +78,42 @@ app.get('/', (req, res) => {
 
 // Add a new customer
 app.post('/customers', async (req, res) => {
-    const { name, mobile, area, email, bill } = req.body;
+    const { name, mobile, area, email, bill, status } = req.body;
     try {
-        const newCustomer = new Customer({ name, mobile, area, email, bill, due: bill });
+        const newCustomer = new Customer({ name, mobile, area, email, bill, due: bill, status }); // Include status
         newCustomer.calculatePaymentStatus();
         await newCustomer.save();
         res.status(201).send(newCustomer);
     } catch (err) {
         console.error(err);
-        res.status(400).send(err.message);
+        res.status(400).send({ error: err.message });
+    }
+});
+
+
+// Get all monthly reports
+app.get('/monthly-reports', async (req, res) => {
+    try {
+        const reports = await MonthlyReport.find();
+        res.status(200).json(reports);
+    } catch (err) {
+        console.error('Error fetching monthly reports:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get a specific monthly report by month and year
+app.get('/monthly-reports/:year/:month', async (req, res) => {
+    const { year, month } = req.params;
+    try {
+        const report = await MonthlyReport.findOne({ year, month });
+        if (!report) {
+            return res.status(404).json({ error: 'Monthly report not found' });
+        }
+        res.status(200).json(report);
+    } catch (err) {
+        console.error('Error fetching monthly report:', err);
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -90,7 +124,7 @@ app.get('/customers', async (req, res) => {
         res.status(200).send(customers);
     } catch (err) {
         console.error(err);
-        res.status(500).send(err.message);
+        res.status(500).send({ error: err.message });
     }
 });
 
@@ -120,16 +154,17 @@ app.delete('/customers/:id', async (req, res) => {
         res.status(200).send(deletedCustomer);
     } catch (err) {
         console.error(err);
-        res.status(500).send(err.message);
+        res.status(500).send({ error: err.message });
     }
 });
+
 
 // Update a customer's details by ID
 app.put('/customers/:id', async (req, res) => {
     const customerId = req.params.id;
-    const { name, mobile, area, email, bill } = req.body;
+    const { name, mobile, area, email, bill, status } = req.body; // Include status in request body
     try {
-        const updatedCustomer = await Customer.findByIdAndUpdate(customerId, { name, mobile, area, email, bill }, { new: true });
+        const updatedCustomer = await Customer.findByIdAndUpdate(customerId, { name, mobile, area, email, bill, status }, { new: true });
         if (!updatedCustomer) {
             return res.status(404).json({ error: 'Customer not found' });
         }
@@ -141,6 +176,9 @@ app.put('/customers/:id', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+
+
 
 // Update payment for a customer by ID
 app.put('/billing/:id', async (req, res) => {
@@ -155,7 +193,7 @@ app.put('/billing/:id', async (req, res) => {
         customer.payments.push({ 
             amount: payment, 
             date: new Date(),
-            receiver // Add receiver to payment record
+            receiver 
         });
         customer.calculatePaymentStatus();
         customer.lastPayDate = new Date();
@@ -164,10 +202,9 @@ app.put('/billing/:id', async (req, res) => {
         res.status(200).send(customer);
     } catch (err) {
         console.error(err);
-        res.status(500).send(err.message);
+        res.status(500).send({ error: err.message });
     }
 });
-
 
 // Search customers by query
 app.get('/search', async (req, res) => {
@@ -188,7 +225,7 @@ app.get('/search', async (req, res) => {
         res.status(200).send(customers);
     } catch (err) {
         console.error(err);
-        res.status(500).send(err.message);
+        res.status(500).send({ error: err.message });
     }
 });
 
@@ -245,8 +282,8 @@ app.get('/dashboard', async (req, res) => {
             { $limit: 5 }
         ]);
 
-         // Monthly revenue data
-         const monthlyRevenue = await Customer.aggregate([
+        // Monthly revenue data
+        const monthlyRevenue = await Customer.aggregate([
             { $unwind: "$payments" },
             { $group: {
                 _id: { $month: "$payments.date" },
@@ -271,8 +308,6 @@ app.get('/dashboard', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-
-
 
 // Endpoint for fetching chart data
 app.get('/dashboard/chart-data', async (req, res) => {
@@ -302,9 +337,6 @@ app.get('/dashboard/chart-data', async (req, res) => {
     }
 });
 
-// Import node-cron
-const cron = require('node-cron');
-
 // Schedule to run on the first day of every month at 12:00 AM
 cron.schedule('0 0 1 * *', async () => {
     try {
@@ -320,19 +352,41 @@ cron.schedule('0 0 1 * *', async () => {
 app.post('/monthly-reports', async (req, res) => {
     try {
         // Perform calculations for monthly reports
-        // Store the monthly report data in another collection in the database
-        // For example:
-        const monthlyReport = new MonthlyReport({
-            // Construct your monthly report data here
+        const totalCollections = await Customer.aggregate([
+            { $unwind: "$payments" },
+            { $group: { _id: null, total: { $sum: "$payments.amount" } } }
+        ]);
+
+        const totalDues = await Customer.aggregate([
+            { $match: { paymentStatus: "Unpaid" } },
+            { $group: { _id: null, total: { $sum: "$due" } } }
+        ]);
+
+        const totalAdvanced = await Customer.aggregate([
+            { $unwind: "$payments" },
+            { $match: { $expr: { $gt: ["$payments.amount", "$bill"] } } },
+            { $group: { _id: null, total: { $sum: { $subtract: ["$payments.amount", "$bill"] } } } }
+        ]);
+
+        const today = new Date();
+        const year = today.getFullYear();
+        const month = today.getMonth() + 1; // getMonth() is zero-based
+
+        const monthlyReportInstance = new MonthlyReport({
+            year,
+            month,
+            totalCollections: totalCollections.length > 0 ? totalCollections[0].total : 0,
+            totalDues: totalDues.length > 0 ? totalDues[0].total : 0,
+            totalAdvanced: totalAdvanced.length > 0 ? totalAdvanced[0].total : 0,
         });
-        await monthlyReport.save();
+
+        await monthlyReportInstance.save();
         res.status(201).send('Monthly report stored successfully.');
     } catch (err) {
         console.error('Error storing monthly report:', err);
         res.status(500).send('Internal Server Error');
     }
 });
-
 
 // Endpoint to get distinct areas
 app.get('/areas', async (req, res) => {
@@ -345,10 +399,15 @@ app.get('/areas', async (req, res) => {
     }
 });
 
-
 // Handle 404 Error
 app.use((req, res) => {
     res.status(404).send('404 Page Not Found');
+});
+
+// Error Handling Middleware
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).send({ error: 'Something went wrong!' });
 });
 
 // Start server
