@@ -90,7 +90,6 @@ app.post('/customers', async (req, res) => {
     }
 });
 
-
 // Get all monthly reports
 app.get('/monthly-reports', async (req, res) => {
     try {
@@ -116,6 +115,7 @@ app.get('/monthly-reports/:year/:month', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 // Get the list of customers
 app.get('/customers', async (req, res) => {
@@ -158,7 +158,6 @@ app.delete('/customers/:id', async (req, res) => {
     }
 });
 
-
 // Update a customer's details by ID
 app.put('/customers/:id', async (req, res) => {
     const customerId = req.params.id;
@@ -176,9 +175,6 @@ app.put('/customers/:id', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-
-
-
 
 // Update payment for a customer by ID
 app.put('/billing/:id', async (req, res) => {
@@ -340,31 +336,37 @@ app.get('/dashboard/chart-data', async (req, res) => {
 // Schedule to run on the first day of every month at 12:00 AM
 cron.schedule('0 0 1 * *', async () => {
     try {
-        // Clear all collections
-        await Customer.deleteMany({});
-        console.log('All collections cleared successfully.');
+        // Trigger monthly report calculation and storage
+        await calculateAndStoreMonthlyReport();
+        console.log('Monthly report stored successfully.');
     } catch (err) {
-        console.error('Error clearing collections:', err);
+        console.error('Error storing monthly report:', err);
     }
 });
 
-// Endpoint to store monthly reports
-app.post('/monthly-reports', async (req, res) => {
+// Function to calculate and store monthly report
+const calculateAndStoreMonthlyReport = async () => {
     try {
-        // Perform calculations for monthly reports
+        const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+        const endOfMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0);
+
+        // Total Collections
         const totalCollections = await Customer.aggregate([
             { $unwind: "$payments" },
+            { $match: { "payments.date": { $gte: startOfMonth, $lt: endOfMonth } } },
             { $group: { _id: null, total: { $sum: "$payments.amount" } } }
         ]);
 
+        // Total Dues
         const totalDues = await Customer.aggregate([
             { $match: { paymentStatus: "Unpaid" } },
             { $group: { _id: null, total: { $sum: "$due" } } }
         ]);
 
+        // Total Advanced
         const totalAdvanced = await Customer.aggregate([
+            { $match: { paymentStatus: "Advanced" } },
             { $unwind: "$payments" },
-            { $match: { $expr: { $gt: ["$payments.amount", "$bill"] } } },
             { $group: { _id: null, total: { $sum: { $subtract: ["$payments.amount", "$bill"] } } } }
         ]);
 
@@ -381,6 +383,17 @@ app.post('/monthly-reports', async (req, res) => {
         });
 
         await monthlyReportInstance.save();
+        console.log('Monthly report stored successfully.');
+    } catch (err) {
+        console.error('Error calculating and storing monthly report:', err);
+    }
+};
+
+
+// Endpoint to store monthly reports
+app.post('/monthly-reports', async (req, res) => {
+    try {
+        await calculateAndStoreMonthlyReport();
         res.status(201).send('Monthly report stored successfully.');
     } catch (err) {
         console.error('Error storing monthly report:', err);
